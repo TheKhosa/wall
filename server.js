@@ -15,7 +15,7 @@ app.get('/', (req, res) => {
         <title>Infinite Collaborative Wall</title>
         <style>
           body { margin: 0; overflow: hidden; font-family: Arial, sans-serif; user-select: none; }
-          #drawing-wall { border: 1px solid black; cursor: crosshair; }
+          #drawing-wall { border: 1px solid black; cursor: crosshair; background-color: #f9f9f9; }
           #controls {
             position: fixed;
             top: 15px;
@@ -25,17 +25,18 @@ app.get('/', (req, res) => {
             border-radius: 5px;
             display: flex;
             align-items: center;
-            z-index: 10; /* Ensure controls are above canvas */
+            z-index: 10;
           }
           #colorPicker { margin-left: 5px; }
           #clearButton {
             margin-left: 15px; padding: 5px 10px; border-radius: 5px;
             border: 1px solid #ccc; cursor: pointer;
           }
-          #info {
+          .info-panel {
             position: fixed; bottom: 10px; right: 10px;
             background-color: rgba(0, 0, 0, 0.5); color: white;
             padding: 5px 10px; border-radius: 3px; font-size: 12px;
+            text-align: right;
           }
         </style>
       </head>
@@ -46,8 +47,10 @@ app.get('/', (req, res) => {
           <button id="clearButton">Clear Wall</button>
         </div>
         <canvas id="drawing-wall"></canvas>
-        <!-- CORRECTED INSTRUCTION TEXT HERE -->
-        <div id="info">Left-click to draw | Hold right-click to pan</div>
+        <div class="info-panel">
+          <div>Left-click: Draw | Right-click: Pan</div>
+          <div id="zoom-level">Zoom: 100%</div>
+        </div>
         <script src="/socket.io/socket.io.js"></script>
         <script>
           document.addEventListener('DOMContentLoaded', () => {
@@ -56,13 +59,19 @@ app.get('/', (req, res) => {
             const context = canvas.getContext('2d');
             const colorPicker = document.getElementById('colorPicker');
             const clearButton = document.getElementById('clearButton');
+            const zoomLevelText = document.getElementById('zoom-level');
 
             canvas.width = window.innerWidth;
             canvas.height = window.innerHeight;
 
-            // --- Camera and Pan State ---
+            // --- Viewport State (Camera & Zoom) ---
             let cameraX = 0;
             let cameraY = 0;
+            let zoom = 1;
+            const MAX_ZOOM = 5;
+            const MIN_ZOOM = 0.1;
+            const SCROLL_SENSITIVITY = 0.005;
+
             let isPanning = false;
             let lastPanX = 0;
             let lastPanY = 0;
@@ -77,20 +86,26 @@ app.get('/', (req, res) => {
 
             // --- Coordinate Transformation ---
             const toWorldCoords = (screenX, screenY) => {
-                return { x: screenX - cameraX, y: screenY - cameraY };
+                return { x: (screenX - cameraX) / zoom, y: (screenY - cameraY) / zoom };
             };
             
             // --- Rendering ---
             const redrawCanvas = () => {
                 context.clearRect(0, 0, canvas.width, canvas.height);
                 context.save();
+                // Apply all transformations
                 context.translate(cameraX, cameraY);
+                context.scale(zoom, zoom);
                 
+                // Draw all segments in world coordinates
                 for (const data of localHistory) {
                     drawSegment(data);
                 }
 
                 context.restore();
+                
+                // Update zoom level display
+                zoomLevelText.textContent = \`Zoom: \${Math.round(zoom * 100)}%\`;
             };
 
             const drawSegment = (data) => {
@@ -98,7 +113,8 @@ app.get('/', (req, res) => {
                 context.moveTo(data.x0, data.y0);
                 context.lineTo(data.x1, data.y1);
                 context.strokeStyle = data.color;
-                context.lineWidth = 5;
+                // Line width appears constant regardless of zoom
+                context.lineWidth = 5 / zoom; 
                 context.lineCap = 'round';
                 context.stroke();
                 context.closePath();
@@ -107,32 +123,42 @@ app.get('/', (req, res) => {
             // --- Event Handlers ---
             colorPicker.addEventListener('input', (e) => currentColor = e.target.value);
             clearButton.addEventListener('click', () => socket.emit('clear'));
+            
+            // --- ZOOM HANDLER ---
+            canvas.addEventListener('wheel', (e) => {
+                e.preventDefault();
+                
+                const worldPosBefore = toWorldCoords(e.offsetX, e.offsetY);
 
+                // Calculate new zoom
+                const zoomAmount = e.deltaY * SCROLL_SENSITIVITY;
+                zoom *= Math.exp(-zoomAmount);
+                zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoom));
 
-            // MOUSE DOWN HANDLER
+                // Adjust camera position to keep mouse position static
+                cameraX = e.offsetX - worldPosBefore.x * zoom;
+                cameraY = e.offsetY - worldPosBefore.y * zoom;
+
+                redrawCanvas();
+            });
+
+            // --- MOUSE DOWN HANDLER ---
             canvas.addEventListener('mousedown', (e) => {
-                // Ensure we only process mouse buttons 0 (Left) and 2 (Right)
-                if (e.button === 2) {
-                    // RIGHT CLICK: Start Panning
+                if (e.button === 2) { // Right-click for Panning
                     isPanning = true;
-                    isDrawing = false; 
                     canvas.style.cursor = 'grabbing';
                     lastPanX = e.clientX;
                     lastPanY = e.clientY;
-                    // Crucial: Prevent context menu immediately on right-click down
-                    e.preventDefault(); 
                 } 
-                else if (e.button === 0) {
-                    // LEFT CLICK: Start Drawing
+                else if (e.button === 0) { // Left-click for Drawing
                     isDrawing = true;
-                    isPanning = false; 
                     const worldPos = toWorldCoords(e.offsetX, e.offsetY);
                     lastDrawX = worldPos.x;
                     lastDrawY = worldPos.y;
                 }
             });
 
-            // MOUSE MOVE HANDLER
+            // --- MOUSE MOVE HANDLER ---
             canvas.addEventListener('mousemove', (e) => {
                 if (isPanning) {
                     const dx = e.clientX - lastPanX;
@@ -145,58 +171,32 @@ app.get('/', (req, res) => {
                 } else if (isDrawing) {
                     const worldPos = toWorldCoords(e.offsetX, e.offsetY);
                     const data = {
-                        x0: lastDrawX,
-                        y0: lastDrawY,
-                        x1: worldPos.x,
-                        y1: worldPos.y,
+                        x0: lastDrawX, y0: lastDrawY,
+                        x1: worldPos.x, y1: worldPos.y,
                         color: currentColor
                     };
                     
                     localHistory.push(data);
                     redrawCanvas();
                     socket.emit('draw', data);
-
                     lastDrawX = worldPos.x;
                     lastDrawY = worldPos.y;
                 }
             });
 
-            // MOUSE UP HANDLER (Released button)
+            // --- MOUSE UP HANDLER ---
             canvas.addEventListener('mouseup', (e) => {
-                if (e.button === 2) { 
-                    isPanning = false;
-                    canvas.style.cursor = 'crosshair';
-                } else if (e.button === 0) { 
-                    isDrawing = false;
-                }
+                if (e.button === 2) { isPanning = false; canvas.style.cursor = 'crosshair'; } 
+                else if (e.button === 0) { isDrawing = false; }
             });
 
-            // MOUSE LEAVE HANDLER (Safety stop)
-            canvas.addEventListener('mouseout', () => {
-                isDrawing = false;
-                // Note: We intentionally don't stop panning here, as the user might still be holding the right button
-                // while temporarily dragging the cursor outside the canvas area.
-            });
-            
-            // PREVENT DEFAULT CONTEXT MENU
-            // This is absolutely vital for right-click panning to work smoothly.
+            // Prevent context menu on right-click
             canvas.addEventListener('contextmenu', e => e.preventDefault());
-            
+
             // --- Socket.IO Listeners ---
-            socket.on('draw', (data) => {
-                localHistory.push(data);
-                redrawCanvas();
-            });
-
-            socket.on('history', (history) => {
-                localHistory = history;
-                redrawCanvas();
-            });
-
-            socket.on('clear', () => {
-                localHistory = [];
-                redrawCanvas();
-            });
+            socket.on('draw', (data) => { localHistory.push(data); redrawCanvas(); });
+            socket.on('history', (history) => { localHistory = history; redrawCanvas(); });
+            socket.on('clear', () => { localHistory = []; redrawCanvas(); });
 
             window.addEventListener('resize', () => {
                 canvas.width = window.innerWidth;
@@ -210,15 +210,13 @@ app.get('/', (req, res) => {
   `);
 });
 
-// --- Server-Side Socket Logic (Unchanged from previous versions) ---
+// --- Server-Side Socket Logic (Unchanged) ---
 io.on('connection', (socket) => {
   socket.emit('history', drawingHistory);
-
   socket.on('draw', (data) => {
     drawingHistory.push(data);
     socket.broadcast.emit('draw', data);
   });
-
   socket.on('clear', () => {
     drawingHistory.length = 0;
     io.emit('clear');
