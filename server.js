@@ -14,7 +14,7 @@ app.get('/', (req, res) => {
       <head>
         <title>Infinite Collaborative Wall</title>
         <style>
-          body { margin: 0; overflow: hidden; font-family: Arial, sans-serif; }
+          body { margin: 0; overflow: hidden; font-family: Arial, sans-serif; user-select: none; }
           #drawing-wall { border: 1px solid black; cursor: crosshair; }
           #controls {
             position: fixed;
@@ -25,6 +25,7 @@ app.get('/', (req, res) => {
             border-radius: 5px;
             display: flex;
             align-items: center;
+            z-index: 10; /* Ensure controls are above canvas */
           }
           #colorPicker { margin-left: 5px; }
           #clearButton {
@@ -45,6 +46,7 @@ app.get('/', (req, res) => {
           <button id="clearButton">Clear Wall</button>
         </div>
         <canvas id="drawing-wall"></canvas>
+        <!-- CORRECTED INSTRUCTION TEXT HERE -->
         <div id="info">Left-click to draw | Hold right-click to pan</div>
         <script src="/socket.io/socket.io.js"></script>
         <script>
@@ -106,25 +108,31 @@ app.get('/', (req, res) => {
             colorPicker.addEventListener('input', (e) => currentColor = e.target.value);
             clearButton.addEventListener('click', () => socket.emit('clear'));
 
+
+            // MOUSE DOWN HANDLER
             canvas.addEventListener('mousedown', (e) => {
-                // Right mouse button for panning (e.button === 2)
+                // Ensure we only process mouse buttons 0 (Left) and 2 (Right)
                 if (e.button === 2) {
+                    // RIGHT CLICK: Start Panning
                     isPanning = true;
-                    isDrawing = false; // Ensure drawing stops if it was active
+                    isDrawing = false; 
                     canvas.style.cursor = 'grabbing';
                     lastPanX = e.clientX;
                     lastPanY = e.clientY;
-                    e.preventDefault();
+                    // Crucial: Prevent context menu immediately on right-click down
+                    e.preventDefault(); 
                 } 
-                // Left mouse button for drawing (e.button === 0)
                 else if (e.button === 0) {
+                    // LEFT CLICK: Start Drawing
                     isDrawing = true;
+                    isPanning = false; 
                     const worldPos = toWorldCoords(e.offsetX, e.offsetY);
                     lastDrawX = worldPos.x;
                     lastDrawY = worldPos.y;
                 }
             });
 
+            // MOUSE MOVE HANDLER
             canvas.addEventListener('mousemove', (e) => {
                 if (isPanning) {
                     const dx = e.clientX - lastPanX;
@@ -145,7 +153,7 @@ app.get('/', (req, res) => {
                     };
                     
                     localHistory.push(data);
-                    redrawCanvas(); // Immediate local feedback
+                    redrawCanvas();
                     socket.emit('draw', data);
 
                     lastDrawX = worldPos.x;
@@ -153,23 +161,26 @@ app.get('/', (req, res) => {
                 }
             });
 
+            // MOUSE UP HANDLER (Released button)
             canvas.addEventListener('mouseup', (e) => {
-                if (e.button === 2) { // Right mouse button released
+                if (e.button === 2) { 
                     isPanning = false;
                     canvas.style.cursor = 'crosshair';
-                } else if (e.button === 0) { // Left mouse button released
+                } else if (e.button === 0) { 
                     isDrawing = false;
                 }
             });
 
-            // Prevent the browser's context menu from appearing on right-click
-            canvas.addEventListener('contextmenu', e => e.preventDefault());
-            
-            // Stop drawing/panning if mouse leaves canvas
+            // MOUSE LEAVE HANDLER (Safety stop)
             canvas.addEventListener('mouseout', () => {
-                // only stop drawing, panning can continue if mouse is held down
-                isDrawing = false; 
+                isDrawing = false;
+                // Note: We intentionally don't stop panning here, as the user might still be holding the right button
+                // while temporarily dragging the cursor outside the canvas area.
             });
+            
+            // PREVENT DEFAULT CONTEXT MENU
+            // This is absolutely vital for right-click panning to work smoothly.
+            canvas.addEventListener('contextmenu', e => e.preventDefault());
             
             // --- Socket.IO Listeners ---
             socket.on('draw', (data) => {
@@ -199,7 +210,7 @@ app.get('/', (req, res) => {
   `);
 });
 
-// --- Server-Side Socket Logic ---
+// --- Server-Side Socket Logic (Unchanged from previous versions) ---
 io.on('connection', (socket) => {
   socket.emit('history', drawingHistory);
 
