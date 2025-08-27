@@ -45,7 +45,7 @@ app.get('/', (req, res) => {
           <button id="clearButton">Clear Wall</button>
         </div>
         <canvas id="drawing-wall"></canvas>
-        <div id="info">Hold middle mouse button to pan</div>
+        <div id="info">Left-click to draw | Hold right-click to pan</div>
         <script src="/socket.io/socket.io.js"></script>
         <script>
           document.addEventListener('DOMContentLoaded', () => {
@@ -77,21 +77,13 @@ app.get('/', (req, res) => {
             const toWorldCoords = (screenX, screenY) => {
                 return { x: screenX - cameraX, y: screenY - cameraY };
             };
-
-            const toScreenCoords = (worldX, worldY) => {
-                return { x: worldX + cameraX, y: worldY + cameraY };
-            };
             
             // --- Rendering ---
             const redrawCanvas = () => {
-                // Clear the viewport
                 context.clearRect(0, 0, canvas.width, canvas.height);
-
-                // Apply the camera transformation
                 context.save();
                 context.translate(cameraX, cameraY);
                 
-                // Draw everything from history
                 for (const data of localHistory) {
                     drawSegment(data);
                 }
@@ -115,15 +107,16 @@ app.get('/', (req, res) => {
             clearButton.addEventListener('click', () => socket.emit('clear'));
 
             canvas.addEventListener('mousedown', (e) => {
-                // Middle mouse button for panning
-                if (e.button === 1) {
+                // Right mouse button for panning (e.button === 2)
+                if (e.button === 2) {
                     isPanning = true;
+                    isDrawing = false; // Ensure drawing stops if it was active
                     canvas.style.cursor = 'grabbing';
                     lastPanX = e.clientX;
                     lastPanY = e.clientY;
                     e.preventDefault();
                 } 
-                // Left mouse button for drawing
+                // Left mouse button for drawing (e.button === 0)
                 else if (e.button === 0) {
                     isDrawing = true;
                     const worldPos = toWorldCoords(e.offsetX, e.offsetY);
@@ -161,22 +154,21 @@ app.get('/', (req, res) => {
             });
 
             canvas.addEventListener('mouseup', (e) => {
-                if (e.button === 1) {
+                if (e.button === 2) { // Right mouse button released
                     isPanning = false;
                     canvas.style.cursor = 'crosshair';
-                } else if (e.button === 0) {
+                } else if (e.button === 0) { // Left mouse button released
                     isDrawing = false;
                 }
             });
 
-            // Prevent context menu on right click
+            // Prevent the browser's context menu from appearing on right-click
             canvas.addEventListener('contextmenu', e => e.preventDefault());
             
             // Stop drawing/panning if mouse leaves canvas
             canvas.addEventListener('mouseout', () => {
-                isDrawing = false;
-                isPanning = false;
-                canvas.style.cursor = 'crosshair';
+                // only stop drawing, panning can continue if mouse is held down
+                isDrawing = false; 
             });
             
             // --- Socket.IO Listeners ---
@@ -209,19 +201,16 @@ app.get('/', (req, res) => {
 
 // --- Server-Side Socket Logic ---
 io.on('connection', (socket) => {
-  // Send the entire drawing history to the new client
   socket.emit('history', drawingHistory);
 
-  // When a client draws, store it and broadcast to others
   socket.on('draw', (data) => {
     drawingHistory.push(data);
     socket.broadcast.emit('draw', data);
   });
 
-  // When a client clears the wall
   socket.on('clear', () => {
-    drawingHistory.length = 0; // Clear the history array
-    io.emit('clear'); // Broadcast to everyone
+    drawingHistory.length = 0;
+    io.emit('clear');
   });
 });
 
