@@ -4,45 +4,37 @@ const http = require('http').Server(app);
 const io = require('socket.io')(http);
 const port = process.env.PORT || 3000;
 
-// In-memory storage for the drawing history.
-// For a real-world application, you might use a database.
+// In-memory storage for the drawing history in "world" coordinates.
 const drawingHistory = [];
 
-// Serve the HTML, CSS, and client-side JavaScript
 app.get('/', (req, res) => {
   res.send(`
     <!DOCTYPE html>
     <html>
       <head>
-        <title>Collaborative Drawing Wall</title>
+        <title>Infinite Collaborative Wall</title>
         <style>
-          body {
-            margin: 0;
-            overflow: hidden;
-            font-family: Arial, sans-serif;
-          }
-          #drawing-wall {
-            border: 1px solid black;
-          }
+          body { margin: 0; overflow: hidden; font-family: Arial, sans-serif; }
+          #drawing-wall { border: 1px solid black; cursor: crosshair; }
           #controls {
             position: fixed;
             top: 15px;
             left: 15px;
             padding: 10px;
-            background-color: rgba(255, 255, 255, 0.8);
+            background-color: rgba(255, 255, 255, 0.85);
             border-radius: 5px;
             display: flex;
             align-items: center;
           }
-          #colorPicker {
-              margin-left: 5px;
-          }
+          #colorPicker { margin-left: 5px; }
           #clearButton {
-            margin-left: 15px;
-            padding: 5px 10px;
-            border-radius: 5px;
-            border: 1px solid #ccc;
-            cursor: pointer;
+            margin-left: 15px; padding: 5px 10px; border-radius: 5px;
+            border: 1px solid #ccc; cursor: pointer;
+          }
+          #info {
+            position: fixed; bottom: 10px; right: 10px;
+            background-color: rgba(0, 0, 0, 0.5); color: white;
+            padding: 5px 10px; border-radius: 3px; font-size: 12px;
           }
         </style>
       </head>
@@ -53,6 +45,7 @@ app.get('/', (req, res) => {
           <button id="clearButton">Clear Wall</button>
         </div>
         <canvas id="drawing-wall"></canvas>
+        <div id="info">Hold middle mouse button to pan</div>
         <script src="/socket.io/socket.io.js"></script>
         <script>
           document.addEventListener('DOMContentLoaded', () => {
@@ -65,92 +58,148 @@ app.get('/', (req, res) => {
             canvas.width = window.innerWidth;
             canvas.height = window.innerHeight;
 
+            // --- Camera and Pan State ---
+            let cameraX = 0;
+            let cameraY = 0;
+            let isPanning = false;
+            let lastPanX = 0;
+            let lastPanY = 0;
+            
+            // --- Drawing State ---
             let isDrawing = false;
             let currentColor = colorPicker.value;
-            let lastX = 0;
-            let lastY = 0;
+            let lastDrawX = 0;
+            let lastDrawY = 0;
 
-            colorPicker.addEventListener('input', (e) => {
-              currentColor = e.target.value;
-            });
+            let localHistory = [];
 
-            clearButton.addEventListener('click', () => {
-                socket.emit('clear');
-            });
+            // --- Coordinate Transformation ---
+            const toWorldCoords = (screenX, screenY) => {
+                return { x: screenX - cameraX, y: screenY - cameraY };
+            };
 
-            function draw(x0, y0, x1, y1, color) {
-              context.beginPath();
-              context.moveTo(x0, y0);
-              context.lineTo(x1, y1);
-              context.strokeStyle = color;
-              context.lineWidth = 5;
-              context.lineCap = 'round'; // Makes lines smoother
-              context.stroke();
-              context.closePath();
-            }
+            const toScreenCoords = (worldX, worldY) => {
+                return { x: worldX + cameraX, y: worldY + cameraY };
+            };
             
-            function clearCanvas() {
+            // --- Rendering ---
+            const redrawCanvas = () => {
+                // Clear the viewport
                 context.clearRect(0, 0, canvas.width, canvas.height);
-            }
 
-            function startDrawing(e) {
-                isDrawing = true;
-                [lastX, lastY] = [e.offsetX, e.offsetY];
-            }
+                // Apply the camera transformation
+                context.save();
+                context.translate(cameraX, cameraY);
+                
+                // Draw everything from history
+                for (const data of localHistory) {
+                    drawSegment(data);
+                }
 
-            function drawOnMove(e) {
-              if (isDrawing) {
-                const data = {
-                    x0: lastX,
-                    y0: lastY,
-                    x1: e.offsetX,
-                    y1: e.offsetY,
-                    color: currentColor
-                };
-                draw(data.x0, data.y0, data.x1, data.y1, data.color);
-                socket.emit('draw', data);
-                [lastX, lastY] = [e.offsetX, e.offsetY];
-              }
-            }
+                context.restore();
+            };
 
-            function stopDrawing() {
-              if (isDrawing) {
-                isDrawing = false;
-              }
-            }
+            const drawSegment = (data) => {
+                context.beginPath();
+                context.moveTo(data.x0, data.y0);
+                context.lineTo(data.x1, data.y1);
+                context.strokeStyle = data.color;
+                context.lineWidth = 5;
+                context.lineCap = 'round';
+                context.stroke();
+                context.closePath();
+            };
 
-            canvas.addEventListener('mousedown', startDrawing);
-            canvas.addEventListener('mousemove', drawOnMove);
-            canvas.addEventListener('mouseup', stopDrawing);
-            canvas.addEventListener('mouseout', stopDrawing);
+            // --- Event Handlers ---
+            colorPicker.addEventListener('input', (e) => currentColor = e.target.value);
+            clearButton.addEventListener('click', () => socket.emit('clear'));
 
-            // Listener for receiving drawing data from others
-            socket.on('draw', (data) => {
-              draw(data.x0, data.y0, data.x1, data.y1, data.color);
-            });
-
-            // Listener for the initial drawing history
-            socket.on('history', (history) => {
-                for (const data of history) {
-                    draw(data.x0, data.y0, data.x1, data.y1, data.color);
+            canvas.addEventListener('mousedown', (e) => {
+                // Middle mouse button for panning
+                if (e.button === 1) {
+                    isPanning = true;
+                    canvas.style.cursor = 'grabbing';
+                    lastPanX = e.clientX;
+                    lastPanY = e.clientY;
+                    e.preventDefault();
+                } 
+                // Left mouse button for drawing
+                else if (e.button === 0) {
+                    isDrawing = true;
+                    const worldPos = toWorldCoords(e.offsetX, e.offsetY);
+                    lastDrawX = worldPos.x;
+                    lastDrawY = worldPos.y;
                 }
             });
 
-            // Listener for the clear event
+            canvas.addEventListener('mousemove', (e) => {
+                if (isPanning) {
+                    const dx = e.clientX - lastPanX;
+                    const dy = e.clientY - lastPanY;
+                    cameraX += dx;
+                    cameraY += dy;
+                    lastPanX = e.clientX;
+                    lastPanY = e.clientY;
+                    redrawCanvas();
+                } else if (isDrawing) {
+                    const worldPos = toWorldCoords(e.offsetX, e.offsetY);
+                    const data = {
+                        x0: lastDrawX,
+                        y0: lastDrawY,
+                        x1: worldPos.x,
+                        y1: worldPos.y,
+                        color: currentColor
+                    };
+                    
+                    localHistory.push(data);
+                    redrawCanvas(); // Immediate local feedback
+                    socket.emit('draw', data);
+
+                    lastDrawX = worldPos.x;
+                    lastDrawY = worldPos.y;
+                }
+            });
+
+            canvas.addEventListener('mouseup', (e) => {
+                if (e.button === 1) {
+                    isPanning = false;
+                    canvas.style.cursor = 'crosshair';
+                } else if (e.button === 0) {
+                    isDrawing = false;
+                }
+            });
+
+            // Prevent context menu on right click
+            canvas.addEventListener('contextmenu', e => e.preventDefault());
+            
+            // Stop drawing/panning if mouse leaves canvas
+            canvas.addEventListener('mouseout', () => {
+                isDrawing = false;
+                isPanning = false;
+                canvas.style.cursor = 'crosshair';
+            });
+            
+            // --- Socket.IO Listeners ---
+            socket.on('draw', (data) => {
+                localHistory.push(data);
+                redrawCanvas();
+            });
+
+            socket.on('history', (history) => {
+                localHistory = history;
+                redrawCanvas();
+            });
+
             socket.on('clear', () => {
-                clearCanvas();
+                localHistory = [];
+                redrawCanvas();
             });
 
             window.addEventListener('resize', () => {
                 canvas.width = window.innerWidth;
                 canvas.height = window.innerHeight;
-                // Redraw history on resize
-                clearCanvas();
-                socket.emit('requestHistory');
+                redrawCanvas();
             });
-
-            // Request history on initial connection
-            socket.emit('requestHistory');
           });
         </script>
       </body>
@@ -158,24 +207,21 @@ app.get('/', (req, res) => {
   `);
 });
 
-// Handle socket connections
+// --- Server-Side Socket Logic ---
 io.on('connection', (socket) => {
-  // Send the drawing history to the newly connected user
-  socket.on('requestHistory', () => {
-    socket.emit('history', drawingHistory);
-  });
+  // Send the entire drawing history to the new client
+  socket.emit('history', drawingHistory);
 
-  // When a user draws, save it and broadcast it
+  // When a client draws, store it and broadcast to others
   socket.on('draw', (data) => {
     drawingHistory.push(data);
-    // Broadcast the drawing data to all other clients
     socket.broadcast.emit('draw', data);
   });
 
-  // When a user clears the wall
+  // When a client clears the wall
   socket.on('clear', () => {
     drawingHistory.length = 0; // Clear the history array
-    io.emit('clear'); // Broadcast the clear event to everyone
+    io.emit('clear'); // Broadcast to everyone
   });
 });
 
